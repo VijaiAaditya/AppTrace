@@ -1,0 +1,12 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/.vs
+/AppTrace.Collector/obj
+/AppTrace.Common/obj
+/AppTrace.Common/bin/Debug/net9.0
+/AppTrace.Query.API/obj
+/AppTrace.Storage/obj
+/AppTrace.UI/bin/Debug/net9.0
+/AppTrace.UI/obj
