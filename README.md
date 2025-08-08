@@ -49,7 +49,3 @@
 
 MIT License — free to use, fork, and extend.
 
----
-
-Let me know if you’d like a **badge layout**, `README.md` starter, or `.gitattributes/.editorconfig` setup too.
-
