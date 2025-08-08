@@ -190,9 +190,8 @@ CREATE INDEX idx_logs_attributes_jsonb ON Logs USING GIN (Attributes);
 7. Add export + auth (if needed)
 
 ---
-You're absolutely right — **Azure Application Insights** provides **automatic telemetry** (requests, dependencies, exceptions, etc.) without you having to manually log everything. To replicate **that ease of use** in your own self-hosted tool **AppTrace**, you need to design a few smart layers.
 
-Here’s how you can **make AppTrace work like App Insights** — including **automatic capture of metrics, traces, and logs** without writing custom logic per app.
+Here’s how you can ** AppTrace work like App Insights** — including **automatic capture of metrics, traces, and logs** without writing custom logic per app.
 
 ---
 
