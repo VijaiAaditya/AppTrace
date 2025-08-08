@@ -195,7 +195,7 @@ Here’s how you can ** AppTrace work like App Insights** — including **automa
 
 ---
 
-## ✅ Key Features of Application Insights You’re Referring To
+## ✅ Key Features of AppTrack You’re Referring To
 
 1. **Automatic collection** of:
 
