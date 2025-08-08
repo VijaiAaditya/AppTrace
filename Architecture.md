@@ -191,10 +191,106 @@ CREATE INDEX idx_logs_attributes_jsonb ON Logs USING GIN (Attributes);
 
 ---
 
-Would you like me to give you:
+1. Use OpenTelemetry Auto-Instrumentation
+OpenTelemetry supports automatic instrumentation for .NET.
 
-* A ready-made `.proto` for your gRPC ingestion?
-* Dapper `INSERT` + `SELECT` query stubs?
-* Blazor WASM project skeleton with UI stubbed pages?
+Install these NuGet packages in your app:
+sh
+Copy
+Edit
+dotnet add package OpenTelemetry.Extensions.Hosting
+dotnet add package OpenTelemetry.Instrumentation.AspNetCore
+dotnet add package OpenTelemetry.Instrumentation.Http
+dotnet add package OpenTelemetry.Instrumentation.SqlClient
+dotnet add package OpenTelemetry.Instrumentation.Runtime
+dotnet add package OpenTelemetry.Exporter.OpenTelemetryProtocol
+This setup automatically captures:
 
-Just say the word.
+Incoming HTTP/gRPC requests
+
+Outgoing HTTP client requests
+
+SQL database calls
+
+Unhandled exceptions
+
+.NET runtime metrics (GC, threads, memory, etc.)
+
+2. Setup an OTLP gRPC Exporter in Your App
+Configure OpenTelemetry to export data to your AppTrace gRPC endpoint.
+
+csharp
+Copy
+Edit
+services.AddOpenTelemetry()
+    .WithTracing(builder =>
+    {
+        builder
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddSqlClientInstrumentation()
+            .AddRuntimeInstrumentation()
+            .AddOtlpExporter(opt =>
+            {
+                opt.Endpoint = new Uri("http://your-apptrace-ingestion-endpoint:4317");
+                opt.Protocol = OtlpExportProtocol.Grpc;
+            });
+    })
+    .WithMetrics(builder =>
+    {
+        builder.AddRuntimeInstrumentation()
+               .AddAspNetCoreInstrumentation()
+               .AddOtlpExporter();
+    });
+No additional logic required per app or per controller.
+
+3. Ensure Context Propagation Is Enabled
+This lets traces flow across microservices using traceId and spanId.
+
+.NET apps already propagate this with B3 or W3C headers. OpenTelemetry handles this automatically.
+
+4. Use OpenTelemetry Resource Attributes
+This allows you to tag services with their name, environment, version, etc.
+
+csharp
+Copy
+Edit
+services.ConfigureOpenTelemetryTracerProvider((sp, builder) =>
+{
+    builder.SetResourceBuilder(ResourceBuilder.CreateDefault()
+        .AddService("UserService", serviceVersion: "1.0.0")
+        .AddAttributes(new[] {
+            new KeyValuePair<string, object>("deployment.environment", "prod")
+        }));
+});
+5. On AppTrace Ingestion Side:
+Your gRPC receiver must:
+
+Accept OTLP payloads
+
+Parse spans, metrics, and logs
+
+Store them in PostgreSQL via Dapper
+
+Optionally pre-aggregate metrics (avg response time, request count)
+
+You don’t need any per-service logic in your apps beyond registering OpenTelemetry — just like App Insights.
+
+🧠 Bonus: What App Insights Does That You Can Also Add Later
+Live Metrics Stream (via WebSocket or polling)
+
+Custom Dashboards
+
+AI-based anomaly detection (possible in future)
+
+Log query language (KQL-like or LINQ for SQL)
+
+✅ Summary
+App Insights Feature	AppTrace Equivalent Approach
+Automatic HTTP tracing	OpenTelemetry.Instrumentation.AspNetCore
+SQL dependencies tracing	OpenTelemetry.Instrumentation.SqlClient
+Auto metrics collection	OpenTelemetry.Instrumentation.Runtime
+Context propagation	Built-in via W3C/B3 headers
+Export to backend	OTLP gRPC to your AppTrace gRPC receiver
+Correlation of services	Use Resource attributes + Trace Contexts
+Minimal setup	Just register OpenTelemetry in DI
