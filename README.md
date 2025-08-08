@@ -1,10 +1,3 @@
-# AppTrace
-AppTrace is a blazing-fast, local-first observability toolkit for capturing, storing, and querying OpenTelemetry-compliant logs, traces, and metrics. Built with .NET 9, Blazor WebAssembly, gRPC, Dapper, and PostgreSQL — designed to be minimal, dependency-free, and production-ready.
-
-Here's a **GitHub description** for your project **AppTrace**, structured professionally with sections commonly expected in open-source telemetry or developer tools:
-
----
-
 ## 🛰️ AppTrace
 
 > **AppTrace** is a blazing-fast, local-first observability toolkit for capturing, storing, and querying **OpenTelemetry-compliant logs, traces, and metrics**. Built with .NET 9, Blazor WebAssembly, gRPC, Dapper, and PostgreSQL — designed to be minimal, dependency-free, and production-ready.
