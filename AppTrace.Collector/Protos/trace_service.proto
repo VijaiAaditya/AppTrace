@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package opentelemetry.proto.collector.trace.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/any.proto";
+
+option csharp_namespace = "OpenTelemetry.Proto.Collector.Trace.V1";
+
+// Service for collecting trace data
+service TraceService {
+  // For performance reasons, it is recommended to keep this RPC
+  // alive for the entire life of the application.
+  rpc Export(ExportTraceServiceRequest) returns (ExportTraceServiceResponse) {}
+}
+
+message ExportTraceServiceRequest {
+  // An array of ResourceSpans.
+  repeated ResourceSpans resource_spans = 1;
+}
+
+message ExportTraceServiceResponse {
+  // The details of a partially successful export request.
+  ExportTracePartialSuccess partial_success = 1;
+}
+
+message ExportTracePartialSuccess {
+  // The number of rejected spans.
+  int64 rejected_spans = 1;
+  // A developer-facing human-readable message in English.
+  string error_message = 2;
+}
+
+message ResourceSpans {
+  // The resource for the spans in this message.
+  Resource resource = 1;
+  // A list of ScopeSpans that originate from a resource.
+  repeated ScopeSpans scope_spans = 2;
+}
+
+message ScopeSpans {
+  // The instrumentation scope information for the spans in this message.
+  InstrumentationScope scope = 1;
+  // A list of Spans that originate from an instrumentation scope.
+  repeated Span spans = 2;
+}
+
+message Resource {
+  // Set of attributes that describe the resource.
+  repeated KeyValue attributes = 1;
+}
+
+message InstrumentationScope {
+  // An empty instrumentation scope name means the name is unknown.
+  string name = 1;
+  string version = 2;
+  repeated KeyValue attributes = 3;
+}
+
+message Span {
+  // A unique identifier for a trace.
+  bytes trace_id = 1;
+  // A unique identifier for a span within a trace.
+  bytes span_id = 2;
+  // The span_id of this span's parent span.
+  bytes parent_span_id = 3;
+  // A description of the span's operation.
+  string name = 4;
+  // Distinguishes between spans generated in a particular context.
+  SpanKind kind = 5;
+  // start_time_unix_nano is the start time of the span.
+  uint64 start_time_unix_nano = 6;
+  // end_time_unix_nano is the end time of the span.
+  uint64 end_time_unix_nano = 7;
+  // attributes is a collection of key/value pairs.
+  repeated KeyValue attributes = 8;
+  // events is a collection of Event items.
+  repeated Event events = 9;
+  // status of the Span.
+  Status status = 10;
+}
+
+enum SpanKind {
+  SPAN_KIND_UNSPECIFIED = 0;
+  SPAN_KIND_INTERNAL = 1;
+  SPAN_KIND_SERVER = 2;
+  SPAN_KIND_CLIENT = 3;
+  SPAN_KIND_PRODUCER = 4;
+  SPAN_KIND_CONSUMER = 5;
+}
+
+message Event {
+  // time_unix_nano is the time the event occurred.
+  uint64 time_unix_nano = 1;
+  // name of the event.
+  string name = 2;
+  // attributes is a collection of attribute key/value pairs on the event.
+  repeated KeyValue attributes = 3;
+}
+
+message Status {
+  // A developer-facing error message.
+  string message = 1;
+  // The status code.
+  StatusCode code = 2;
+}
+
+enum StatusCode {
+  STATUS_CODE_UNSET = 0;
+  STATUS_CODE_OK = 1;
+  STATUS_CODE_ERROR = 2;
+}
+
+message KeyValue {
+  string key = 1;
+  AnyValue value = 2;
+}
+
+message AnyValue {
+  oneof value {
+    string string_value = 1;
+    bool bool_value = 2;
+    int64 int_value = 3;
+    double double_value = 4;
+    ArrayValue array_value = 5;
+    KeyValueList kvlist_value = 6;
+    bytes bytes_value = 7;
+  }
+}
+
+message ArrayValue {
+  repeated AnyValue values = 1;
+}
+
+message KeyValueList {
+  repeated KeyValue values = 1;
+}

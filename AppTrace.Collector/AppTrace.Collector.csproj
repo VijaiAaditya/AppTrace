@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.66.0" />
+    <PackageReference Include="Google.Protobuf" Version="3.28.2" />
+    <PackageReference Include="Grpc.Tools" Version="2.66.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AppTrace.Common\AppTrace.Common.csproj" />
+    <ProjectReference Include="..\AppTrace.Storage\AppTrace.Storage.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="Protos\trace_service.proto" GrpcServices="Server" />
+    <Protobuf Include="Protos\logs_service.proto" GrpcServices="Server" />
+    <Protobuf Include="Protos\metrics_service.proto" GrpcServices="Server" />
+  </ItemGroup>
+
+</Project>

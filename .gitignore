@@ -10,3 +10,6 @@
 /AppTrace.Storage/obj
 /AppTrace.UI/bin/Debug/net9.0
 /AppTrace.UI/obj
+/AppTrace.Collector/bin/Debug/net9.0
+/AppTrace.Query.API/bin/Debug/net9.0
+/AppTrace.Storage/bin/Debug/net9.0
