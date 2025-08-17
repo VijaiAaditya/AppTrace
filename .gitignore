@@ -13,3 +13,13 @@
 /AppTrace.Collector/bin/Debug/net9.0
 /AppTrace.Query.API/bin/Debug/net9.0
 /AppTrace.Storage/bin/Debug/net9.0
+/Tests/AppTrace.Collector.Tests/bin/Debug/net9.0
+/Tests/AppTrace.Collector.Tests/obj
+/Tests/AppTrace.Common.Tests/bin/Debug/net9.0
+/Tests/AppTrace.Common.Tests/obj
+/Tests/AppTrace.Integration.Tests/bin/Debug/net9.0
+/Tests/AppTrace.Integration.Tests/obj
+/Tests/AppTrace.Storage.Tests/bin/Debug/net9.0
+/Tests/AppTrace.Storage.Tests/obj
+/Tests/AppTrace.UI.Tests/bin/Debug/net9.0
+/Tests/AppTrace.UI.Tests/obj

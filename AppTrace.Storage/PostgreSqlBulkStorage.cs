@@ -4,6 +4,7 @@ using Npgsql;
 using System.Text.Json;
 using System.Data;
 using Microsoft.Extensions.Logging;
+using NpgsqlTypes;
 
 namespace AppTrace.Storage;
 

@@ -1,6 +1,7 @@
 using AppTrace.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace AppTrace.Storage;
 
@@ -11,10 +12,11 @@ public static class StorageServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddAppTraceStorage(this IServiceCollection services, IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("PostgreSQL") 
+        var connectionString = configuration.GetConnectionString("PostgreSQL")
             ?? throw new InvalidOperationException("PostgreSQL connection string is required");
 
-        var storageType = configuration.GetValue<string>("AppTrace:StorageType")?.ToLowerInvariant() ?? "standard";
+        // Fix: Use the GetSection method to retrieve the value manually
+        var storageType = configuration.GetSection("AppTrace:StorageType").Value?.ToLowerInvariant() ?? "standard";
 
         return storageType switch
         {
@@ -36,11 +38,11 @@ public static class StorageServiceCollectionExtensions
 
     private static IServiceCollection AddPostgreSqlStorage(IServiceCollection services, string connectionString)
     {
-        services.AddScoped<ILogStorage>(provider => 
+        services.AddScoped<ILogStorage>(provider =>
             new PostgreSqlLogStorage(connectionString, provider.GetRequiredService<ILogger<PostgreSqlLogStorage>>()));
-        services.AddScoped<ITraceStorage>(provider => 
+        services.AddScoped<ITraceStorage>(provider =>
             new PostgreSqlTraceStorage(connectionString, provider.GetRequiredService<ILogger<PostgreSqlTraceStorage>>()));
-        services.AddScoped<IMetricStorage>(provider => 
+        services.AddScoped<IMetricStorage>(provider =>
             new PostgreSqlMetricStorage(connectionString, provider.GetRequiredService<ILogger<PostgreSqlMetricStorage>>()));
         return services;
     }
@@ -48,13 +50,13 @@ public static class StorageServiceCollectionExtensions
     private static IServiceCollection AddBulkStorage(IServiceCollection services, string connectionString)
     {
         // Single implementation that handles all three interfaces
-        services.AddScoped<PostgreSqlBulkStorage>(provider => 
+        services.AddScoped<PostgreSqlBulkStorage>(provider =>
             new PostgreSqlBulkStorage(connectionString, provider.GetRequiredService<ILogger<PostgreSqlBulkStorage>>()));
-        
+
         services.AddScoped<ILogStorage>(provider => provider.GetRequiredService<PostgreSqlBulkStorage>());
         services.AddScoped<ITraceStorage>(provider => provider.GetRequiredService<PostgreSqlBulkStorage>());
         services.AddScoped<IMetricStorage>(provider => provider.GetRequiredService<PostgreSqlBulkStorage>());
-        
+
         return services;
     }
 }

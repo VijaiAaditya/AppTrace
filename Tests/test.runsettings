@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <Format>cobertura,json</Format>
+          <Exclude>[*]*.Tests*</Exclude>
+          <Include>[AppTrace.*]*</Include>
+          <ExcludeByFile>**/Migrations/**/*.*</ExcludeByFile>
+          <SingleHit>false</SingleHit>
+          <UseSourceLink>true</UseSourceLink>
+          <IncludeTestAssembly>false</IncludeTestAssembly>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+  
+  <TestRunParameters>
+    <Parameter name="Environment" value="Test" />
+    <Parameter name="UseTestContainers" value="true" />
+  </TestRunParameters>
+  
+  <RunConfiguration>
+    <MaxCpuCount>0</MaxCpuCount>
+    <ResultsDirectory>./TestResults</ResultsDirectory>
+    <TreatTestAdapterErrorsAsWarnings>false</TreatTestAdapterErrorsAsWarnings>
+  </RunConfiguration>
+</RunSettings>
