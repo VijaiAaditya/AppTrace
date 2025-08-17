@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
@@ -11,7 +11,7 @@
   <ItemGroup>
     <!-- Modern Testing Framework -->
     <PackageReference Include="xunit" Version="2.9.0" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4">
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
@@ -39,8 +39,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\AppTrace.Common\AppTrace.Common.csproj" />
-    <ProjectReference Include="..\..\AppTrace.UI\AppTrace.UI.csproj" />
-
+    <!-- Keep UI project reference removed to avoid static web asset conflict -->
   </ItemGroup>
-
+  
 </Project>

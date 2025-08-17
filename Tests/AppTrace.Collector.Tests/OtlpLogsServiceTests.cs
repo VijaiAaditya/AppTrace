@@ -9,6 +9,10 @@ using NSubstitute;
 using OpenTelemetry.Proto.Collector.Logs.V1;
 using Xunit;
 using Google.Protobuf;
+using NSubstitute.ExceptionExtensions;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using System;
 
 namespace AppTrace.Collector.Tests;
 
@@ -123,7 +127,7 @@ public class OtlpLogsServiceTests
             log.Severity.Should().Be(severity));
     }
 
-    private ExportLogsServiceRequest CreateValidLogRequest()
+    private static ExportLogsServiceRequest CreateValidLogRequest()
     {
         var request = new ExportLogsServiceRequest();
         var resourceLog = new ResourceLogs
@@ -140,14 +144,14 @@ public class OtlpLogsServiceTests
         var scopeLog = new ScopeLogs();
         scopeLog.LogRecords.Add(new LogRecord
         {
-            TimeUnixNano = (ulong)DateTimeOffset.UtcNow.ToUnixTimeNanoseconds(),
+            TimeUnixNano = GetUnixTimeNanoseconds(DateTimeOffset.UtcNow),
             SeverityText = "INFO",
             Body = new AnyValue { StringValue = "Test log message 1" }
         });
         
         scopeLog.LogRecords.Add(new LogRecord
         {
-            TimeUnixNano = (ulong)DateTimeOffset.UtcNow.ToUnixTimeNanoseconds(),
+            TimeUnixNano = GetUnixTimeNanoseconds(DateTimeOffset.UtcNow),
             SeverityText = "ERROR", 
             Body = new AnyValue { StringValue = "Test log message 2" }
         });
@@ -158,7 +162,7 @@ public class OtlpLogsServiceTests
         return request;
     }
 
-    private ExportLogsServiceRequest CreateLogRequestWithSeverity(string severity)
+    private static ExportLogsServiceRequest CreateLogRequestWithSeverity(string severity)
     {
         var request = new ExportLogsServiceRequest();
         var resourceLog = new ResourceLogs
@@ -175,7 +179,7 @@ public class OtlpLogsServiceTests
         var scopeLog = new ScopeLogs();
         scopeLog.LogRecords.Add(new LogRecord
         {
-            TimeUnixNano = (ulong)DateTimeOffset.UtcNow.ToUnixTimeNanoseconds(),
+            TimeUnixNano = GetUnixTimeNanoseconds(DateTimeOffset.UtcNow),
             SeverityText = severity,
             Body = new AnyValue { StringValue = $"Test {severity} message" }
         });
@@ -184,5 +188,9 @@ public class OtlpLogsServiceTests
         request.ResourceLogs.Add(resourceLog);
 
         return request;
+    }
+    private static ulong GetUnixTimeNanoseconds(DateTimeOffset dateTimeOffset)
+    {
+        return (ulong)(dateTimeOffset.ToUnixTimeMilliseconds() * 1_000_000);
     }
 }
