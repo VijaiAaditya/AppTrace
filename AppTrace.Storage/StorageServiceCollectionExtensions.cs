@@ -51,7 +51,10 @@ public static class StorageServiceCollectionExtensions
     {
         // Single implementation that handles all three interfaces
         services.AddScoped<PostgreSqlBulkStorage>(provider =>
-            new PostgreSqlBulkStorage(connectionString, provider.GetRequiredService<ILogger<PostgreSqlBulkStorage>>()));
+            new PostgreSqlBulkStorage(
+                connectionString,
+                provider.GetRequiredService<ILogger<PostgreSqlBulkStorage>>(),
+                provider.GetRequiredService<IConfiguration>()));
 
         services.AddScoped<ILogStorage>(provider => provider.GetRequiredService<PostgreSqlBulkStorage>());
         services.AddScoped<ITraceStorage>(provider => provider.GetRequiredService<PostgreSqlBulkStorage>());

@@ -81,7 +81,7 @@ public class OtlpTraceService : TraceService.TraceServiceBase
     {
         // Convert nanoseconds to ticks (1 tick = 100 nanoseconds)
         var ticks = (long)(nanoseconds / 100);
-        return DateTimeOffset.FromUnixTimeMilliseconds(0).AddTicks(ticks);
+        return DateTimeOffset.UnixEpoch.AddTicks(ticks);
     }
 
     private static string ExtractServiceName(Resource resource)

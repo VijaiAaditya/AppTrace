@@ -1,7 +1,20 @@
 using AppTrace.Collector.Services;
 using AppTrace.Storage;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Kestrel for HTTP/2 (gRPC)
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.ConfigureEndpointDefaults(listenOptions =>
+    {
+        listenOptions.Protocols = HttpProtocols.Http2;
+    });
+
+    // Optional: increase limits for large OTLP payloads
+    options.Limits.MaxRequestBodySize = 1024 * 1024 * 50; // 50 MB
+});
 
 // Add gRPC
 builder.Services.AddGrpc();
@@ -12,11 +25,11 @@ builder.Services.AddAppTraceStorage(builder.Configuration);
 // Add CORS for web UI
 builder.Services.AddCors(options =>
 {
-    options.AddDefaultPolicy(builder =>
+    options.AddDefaultPolicy(policy =>
     {
-        builder.WithOrigins("*")
-               .AllowAnyHeader()
-               .AllowAnyMethod();
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
     });
 });
 

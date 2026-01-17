@@ -5,21 +5,62 @@ using System.Text.Json;
 using System.Data;
 using Microsoft.Extensions.Logging;
 using NpgsqlTypes;
+using Microsoft.Extensions.Configuration;
+using Polly;
+using Polly.Retry;
 
 namespace AppTrace.Storage;
 
 /// <summary>
 /// High-performance PostgreSQL storage using PostgreSQL COPY for ultra-fast bulk insertions
+/// Adds batching, concurrency limiting and retry policies for production readiness
 /// </summary>
 public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
 {
     private readonly string _connectionString;
     private readonly ILogger<PostgreSqlBulkStorage> _logger;
+    private readonly int _batchSize;
+    private readonly int _maxConcurrency;
+    private readonly int _maxRetries;
+    private readonly TimeSpan _retryBackoffBase;
+    private readonly SemaphoreSlim _concurrencySemaphore;
+    private readonly AsyncRetryPolicy _retryPolicy;
 
-    public PostgreSqlBulkStorage(string connectionString, ILogger<PostgreSqlBulkStorage> logger)
+    public PostgreSqlBulkStorage(string connectionString, ILogger<PostgreSqlBulkStorage> logger, IConfiguration configuration)
     {
         _connectionString = connectionString;
         _logger = logger;
+
+        // Configuration with sensible defaults
+        _batchSize = int.TryParse(configuration["AppTrace:Performance:BatchSize"], out var bs) ? bs : 1000;
+        _maxConcurrency = int.TryParse(configuration["AppTrace:Performance:ConnectionPoolSize"], out var mc) ? mc : 4;
+        _maxRetries = int.TryParse(configuration["AppTrace:Performance:MaxRetries"], out var mr) ? mr : 3;
+        _retryBackoffBase = TimeSpan.FromSeconds(double.TryParse(configuration["AppTrace:Performance:RetryBackoffSeconds"], out var rb) ? rb : 1);
+
+        _concurrencySemaphore = new SemaphoreSlim(_maxConcurrency);
+
+        _retryPolicy = Policy
+            .Handle<Exception>()
+            .WaitAndRetryAsync(_maxRetries, attempt => TimeSpan.FromMilliseconds(_retryBackoffBase.TotalMilliseconds * Math.Pow(2, attempt - 1)), onRetry: (ex, ts, attempt, ctx) =>
+            {
+                _logger.LogWarning(ex, "Retry {Attempt} after {Delay}ms due to error", attempt, ts.TotalMilliseconds);
+            });
+    }
+
+    // Helper to chunk enumerable
+    private static IEnumerable<List<T>> Chunk<T>(IEnumerable<T> source, int chunkSize)
+    {
+        var bucket = new List<T>(chunkSize);
+        foreach (var item in source)
+        {
+            bucket.Add(item);
+            if (bucket.Count >= chunkSize)
+            {
+                yield return bucket;
+                bucket = new List<T>(chunkSize);
+            }
+        }
+        if (bucket.Count > 0) yield return bucket;
     }
 
     // ============ LOG STORAGE ============
@@ -27,36 +68,51 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
     {
         if (!logs.Any()) return;
 
+        var batches = Chunk(logs, _batchSize).ToList();
+        _logger.LogDebug("Inserting {Total} logs in {Batches} batches (batchSize={BatchSize})", logs.Count(), batches.Count, _batchSize);
+
+        var tasks = batches.Select(batch => _retryPolicy.ExecuteAsync(() => InsertLogBatchAsync(batch)));
+        await Task.WhenAll(tasks);
+    }
+
+    private async Task InsertLogBatchAsync(List<LogEntry> logs)
+    {
+        await _concurrencySemaphore.WaitAsync();
         try
         {
             using var connection = new NpgsqlConnection(_connectionString);
             await connection.OpenAsync();
 
-            // Use PostgreSQL COPY for maximum performance
-            using var writer = await connection.BeginBinaryImportAsync(
-                "COPY logs (id, timestamp, trace_id, span_id, severity, body, attributes, service_name) FROM STDIN (FORMAT BINARY)");
-
-            foreach (var log in logs)
+            try
             {
-                await writer.StartRowAsync();
-                await writer.WriteAsync(log.Id, NpgsqlDbType.Uuid);
-                await writer.WriteAsync(log.Timestamp, NpgsqlDbType.TimestampTz);
-                await writer.WriteAsync(log.TraceId ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                await writer.WriteAsync(log.SpanId ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                await writer.WriteAsync(log.Severity ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                await writer.WriteAsync(log.Body ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                await writer.WriteAsync(JsonSerializer.Serialize(log.Attributes ?? new Dictionary<string, object>()), NpgsqlDbType.Jsonb);
-                await writer.WriteAsync(log.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown", NpgsqlDbType.Text);
-            }
+                using var writer = await connection.BeginBinaryImportAsync(
+                    "COPY logs (id, timestamp, trace_id, span_id, severity, body, attributes, service_name) FROM STDIN (FORMAT BINARY)");
 
-            await writer.CompleteAsync();
-            _logger.LogDebug("Bulk inserted {Count} log entries using COPY", logs.Count());
+                foreach (var log in logs)
+                {
+                    await writer.StartRowAsync();
+                    await writer.WriteAsync(log.Id, NpgsqlDbType.Uuid);
+                    await writer.WriteAsync(log.Timestamp, NpgsqlDbType.TimestampTz);
+                    await writer.WriteAsync(log.TraceId ?? (object)DBNull.Value, NpgsqlDbType.Text);
+                    await writer.WriteAsync(log.SpanId ?? (object)DBNull.Value, NpgsqlDbType.Text);
+                    await writer.WriteAsync(log.Severity ?? (object)DBNull.Value, NpgsqlDbType.Text);
+                    await writer.WriteAsync(log.Body ?? (object)DBNull.Value, NpgsqlDbType.Text);
+                    await writer.WriteAsync(JsonSerializer.Serialize(log.Attributes ?? new Dictionary<string, object>()), NpgsqlDbType.Jsonb);
+                    await writer.WriteAsync(log.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown", NpgsqlDbType.Text);
+                }
+
+                await writer.CompleteAsync();
+                _logger.LogDebug("Bulk inserted {Count} log entries using COPY", logs.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed COPY for {Count} log entries, falling back", logs.Count);
+                await FallbackInsertLogsAsync(logs);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogError(ex, "Failed to bulk insert {Count} log entries", logs.Count());
-            // Fallback to standard insert
-            await FallbackInsertLogsAsync(logs);
+            _concurrencySemaphore.Release();
         }
     }
 
@@ -69,20 +125,31 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
         using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync();
 
-        var parameters = logs.Select(log => new
+        using var tx = await connection.BeginTransactionAsync();
+        try
         {
-            Id = log.Id,
-            Timestamp = log.Timestamp,
-            TraceId = log.TraceId,
-            SpanId = log.SpanId,
-            Severity = log.Severity,
-            Body = log.Body,
-            Attributes = JsonSerializer.Serialize(log.Attributes ?? new Dictionary<string, object>()),
-            ServiceName = log.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown"
-        });
+            var parameters = logs.Select(log => new
+            {
+                Id = log.Id,
+                Timestamp = log.Timestamp,
+                TraceId = log.TraceId,
+                SpanId = log.SpanId,
+                Severity = log.Severity,
+                Body = log.Body,
+                Attributes = JsonSerializer.Serialize(log.Attributes ?? new Dictionary<string, object>()),
+                ServiceName = log.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown"
+            });
 
-        await connection.ExecuteAsync(sql, parameters);
-        _logger.LogDebug("Fallback inserted {Count} log entries", logs.Count());
+            await connection.ExecuteAsync(sql, parameters);
+            await tx.CommitAsync();
+            _logger.LogDebug("Fallback inserted {Count} log entries", logs.Count());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Fallback insert failed for {Count} log entries", logs.Count());
+            await tx.RollbackAsync();
+            throw;
+        }
     }
 
     public async Task<IEnumerable<LogEntry>> GetLogsAsync(int limit = 100, int offset = 0)
@@ -97,7 +164,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
         await connection.OpenAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { Limit = limit, Offset = offset });
-        
+
         return results.Select(row => new LogEntry
         {
             Id = row.id,
@@ -124,7 +191,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
 
         var searchPattern = $"%{searchTerm}%";
         var results = await connection.QueryAsync<dynamic>(sql, new { SearchTerm = searchPattern, Limit = limit, Offset = offset });
-        
+
         return results.Select(row => new LogEntry
         {
             Id = row.id,
@@ -142,36 +209,53 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
     {
         if (!traces.Any()) return;
 
+        var batches = Chunk(traces, _batchSize).ToList();
+        _logger.LogDebug("Inserting {Total} traces in {Batches} batches (batchSize={BatchSize})", traces.Count(), batches.Count, _batchSize);
+
+        var tasks = batches.Select(batch => _retryPolicy.ExecuteAsync(() => InsertTraceBatchAsync(batch)));
+        await Task.WhenAll(tasks);
+    }
+
+    private async Task InsertTraceBatchAsync(List<TraceEntry> traces)
+    {
+        await _concurrencySemaphore.WaitAsync();
         try
         {
             using var connection = new NpgsqlConnection(_connectionString);
             await connection.OpenAsync();
 
-            using var writer = await connection.BeginBinaryImportAsync(
-                "COPY traces (id, trace_id, span_id, parent_span_id, name, start_time, end_time, attributes, status, service_name) FROM STDIN (FORMAT BINARY)");
-
-            foreach (var trace in traces)
+            try
             {
-                await writer.StartRowAsync();
-                await writer.WriteAsync(trace.Id, NpgsqlDbType.Uuid);
-                await writer.WriteAsync(trace.TraceId ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                await writer.WriteAsync(trace.SpanId ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                await writer.WriteAsync(trace.ParentSpanId ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                await writer.WriteAsync(trace.Name ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                await writer.WriteAsync(trace.StartTime, NpgsqlDbType.TimestampTz);
-                await writer.WriteAsync(trace.EndTime, NpgsqlDbType.TimestampTz);
-                await writer.WriteAsync(JsonSerializer.Serialize(trace.Attributes ?? new Dictionary<string, object>()), NpgsqlDbType.Jsonb);
-                await writer.WriteAsync(trace.Status ?? "OK", NpgsqlDbType.Text);
-                await writer.WriteAsync(trace.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown", NpgsqlDbType.Text);
-            }
+                using var writer = await connection.BeginBinaryImportAsync(
+                    "COPY traces (id, trace_id, span_id, parent_span_id, name, start_time, end_time, attributes, status, service_name) FROM STDIN (FORMAT BINARY)");
 
-            await writer.CompleteAsync();
-            _logger.LogDebug("Bulk inserted {Count} trace entries using COPY", traces.Count());
+                foreach (var trace in traces)
+                {
+                    await writer.StartRowAsync();
+                    await writer.WriteAsync(trace.Id, NpgsqlDbType.Uuid);
+                    await writer.WriteAsync(trace.TraceId ?? (object)DBNull.Value, NpgsqlDbType.Text);
+                    await writer.WriteAsync(trace.SpanId ?? (object)DBNull.Value, NpgsqlDbType.Text);
+                    await writer.WriteAsync(trace.ParentSpanId ?? (object)DBNull.Value, NpgsqlDbType.Text);
+                    await writer.WriteAsync(trace.Name ?? (object)DBNull.Value, NpgsqlDbType.Text);
+                    await writer.WriteAsync(trace.StartTime, NpgsqlDbType.TimestampTz);
+                    await writer.WriteAsync(trace.EndTime, NpgsqlDbType.TimestampTz);
+                    await writer.WriteAsync(JsonSerializer.Serialize(trace.Attributes ?? new Dictionary<string, object>()), NpgsqlDbType.Jsonb);
+                    await writer.WriteAsync(trace.Status ?? "OK", NpgsqlDbType.Text);
+                    await writer.WriteAsync(trace.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown", NpgsqlDbType.Text);
+                }
+
+                await writer.CompleteAsync();
+                _logger.LogDebug("Bulk inserted {Count} trace entries using COPY", traces.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed COPY for {Count} trace entries, falling back", traces.Count);
+                await FallbackInsertTracesAsync(traces);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogError(ex, "Failed to bulk insert {Count} trace entries", traces.Count());
-            await FallbackInsertTracesAsync(traces);
+            _concurrencySemaphore.Release();
         }
     }
 
@@ -184,21 +268,32 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
         using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync();
 
-        var parameters = traces.Select(trace => new
+        using var tx = await connection.BeginTransactionAsync();
+        try
         {
-            Id = trace.Id,
-            TraceId = trace.TraceId,
-            SpanId = trace.SpanId,
-            ParentSpanId = trace.ParentSpanId,
-            Name = trace.Name,
-            StartTime = trace.StartTime,
-            EndTime = trace.EndTime,
-            Attributes = JsonSerializer.Serialize(trace.Attributes ?? new Dictionary<string, object>()),
-            Status = trace.Status,
-            ServiceName = trace.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown"
-        });
+            var parameters = traces.Select(trace => new
+            {
+                Id = trace.Id,
+                TraceId = trace.TraceId,
+                SpanId = trace.SpanId,
+                ParentSpanId = trace.ParentSpanId,
+                Name = trace.Name,
+                StartTime = trace.StartTime,
+                EndTime = trace.EndTime,
+                Attributes = JsonSerializer.Serialize(trace.Attributes ?? new Dictionary<string, object>()),
+                Status = trace.Status,
+                ServiceName = trace.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown"
+            });
 
-        await connection.ExecuteAsync(sql, parameters);
+            await connection.ExecuteAsync(sql, parameters);
+            await tx.CommitAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Fallback insert failed for {Count} trace entries", traces.Count());
+            await tx.RollbackAsync();
+            throw;
+        }
     }
 
     public async Task<IEnumerable<TraceEntry>> GetTracesAsync(int limit = 100, int offset = 0)
@@ -214,7 +309,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
         await connection.OpenAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { Limit = limit, Offset = offset });
-        
+
         return results.Select(row => new TraceEntry
         {
             Id = row.id,
@@ -242,7 +337,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
         await connection.OpenAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { TraceId = traceId });
-        
+
         return results.Select(row => new TraceEntry
         {
             Id = row.id,
@@ -262,32 +357,49 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
     {
         if (!metrics.Any()) return;
 
+        var batches = Chunk(metrics, _batchSize).ToList();
+        _logger.LogDebug("Inserting {Total} metrics in {Batches} batches (batchSize={BatchSize})", metrics.Count(), batches.Count, _batchSize);
+
+        var tasks = batches.Select(batch => _retryPolicy.ExecuteAsync(() => InsertMetricBatchAsync(batch)));
+        await Task.WhenAll(tasks);
+    }
+
+    private async Task InsertMetricBatchAsync(List<MetricEntry> metrics)
+    {
+        await _concurrencySemaphore.WaitAsync();
         try
         {
             using var connection = new NpgsqlConnection(_connectionString);
             await connection.OpenAsync();
 
-            using var writer = await connection.BeginBinaryImportAsync(
-                "COPY metrics (id, name, timestamp, value, attributes, service_name) FROM STDIN (FORMAT BINARY)");
-
-            foreach (var metric in metrics)
+            try
             {
-                await writer.StartRowAsync();
-                await writer.WriteAsync(metric.Id, NpgsqlDbType.Uuid);
-                await writer.WriteAsync(metric.Name ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                await writer.WriteAsync(metric.Timestamp, NpgsqlDbType.TimestampTz);
-                await writer.WriteAsync(metric.Value, NpgsqlDbType.Double);
-                await writer.WriteAsync(JsonSerializer.Serialize(metric.Attributes ?? new Dictionary<string, object>()), NpgsqlDbType.Jsonb);
-                await writer.WriteAsync(metric.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown", NpgsqlDbType.Text);
-            }
+                using var writer = await connection.BeginBinaryImportAsync(
+                    "COPY metrics (id, name, timestamp, value, attributes, service_name) FROM STDIN (FORMAT BINARY)");
 
-            await writer.CompleteAsync();
-            _logger.LogDebug("Bulk inserted {Count} metric entries using COPY", metrics.Count());
+                foreach (var metric in metrics)
+                {
+                    await writer.StartRowAsync();
+                    await writer.WriteAsync(metric.Id, NpgsqlDbType.Uuid);
+                    await writer.WriteAsync(metric.Name ?? (object)DBNull.Value, NpgsqlDbType.Text);
+                    await writer.WriteAsync(metric.Timestamp, NpgsqlDbType.TimestampTz);
+                    await writer.WriteAsync(metric.Value, NpgsqlDbType.Double);
+                    await writer.WriteAsync(JsonSerializer.Serialize(metric.Attributes ?? new Dictionary<string, object>()), NpgsqlDbType.Jsonb);
+                    await writer.WriteAsync(metric.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown", NpgsqlDbType.Text);
+                }
+
+                await writer.CompleteAsync();
+                _logger.LogDebug("Bulk inserted {Count} metric entries using COPY", metrics.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed COPY for {Count} metric entries, falling back", metrics.Count);
+                await FallbackInsertMetricsAsync(metrics);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogError(ex, "Failed to bulk insert {Count} metric entries", metrics.Count());
-            await FallbackInsertMetricsAsync(metrics);
+            _concurrencySemaphore.Release();
         }
     }
 
@@ -300,17 +412,28 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
         using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync();
 
-        var parameters = metrics.Select(metric => new
+        using var tx = await connection.BeginTransactionAsync();
+        try
         {
-            Id = metric.Id,
-            Name = metric.Name,
-            Timestamp = metric.Timestamp,
-            Value = metric.Value,
-            Attributes = JsonSerializer.Serialize(metric.Attributes ?? new Dictionary<string, object>()),
-            ServiceName = metric.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown"
-        });
+            var parameters = metrics.Select(metric => new
+            {
+                Id = metric.Id,
+                Name = metric.Name,
+                Timestamp = metric.Timestamp,
+                Value = metric.Value,
+                Attributes = JsonSerializer.Serialize(metric.Attributes ?? new Dictionary<string, object>()),
+                ServiceName = metric.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown"
+            });
 
-        await connection.ExecuteAsync(sql, parameters);
+            await connection.ExecuteAsync(sql, parameters);
+            await tx.CommitAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Fallback insert failed for {Count} metric entries", metrics.Count());
+            await tx.RollbackAsync();
+            throw;
+        }
     }
 
     public async Task<IEnumerable<MetricEntry>> GetMetricsAsync(int limit = 100, int offset = 0)
@@ -325,7 +448,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
         await connection.OpenAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { Limit = limit, Offset = offset });
-        
+
         return results.Select(row => new MetricEntry
         {
             Id = row.id,
@@ -350,7 +473,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
 
         var searchPattern = $"%{metricName}%";
         var results = await connection.QueryAsync<dynamic>(sql, new { MetricName = searchPattern, Limit = limit, Offset = offset });
-        
+
         return results.Select(row => new MetricEntry
         {
             Id = row.id,

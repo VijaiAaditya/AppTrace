@@ -158,6 +158,44 @@ You don't need to write custom logic in 90% of cases — that’s the "auto" mag
 
 ---
 
+## ✅ Ingestion Scalability Improvements
+
+The collector's ingestion and storage layers were updated to support high-throughput, real-time scenarios. Add this section to record the changes, configuration keys, and next recommended steps.
+
+## What changed (summary)
+
+- Added configurable batching/chunking for all bulk inserts (default `AppTrace:Performance:BatchSize = 1000`).
+- Added a concurrency limiter (SemaphoreSlim) to bound concurrent COPY/insert workers (config `AppTrace:Performance:ConnectionPoolSize`, default 4).
+- Added a retry policy using Polly with exponential backoff and configurable max retries (`AppTrace:Performance:MaxRetries`, default 3) and base backoff seconds (`AppTrace:Performance:RetryBackoffSeconds`, default 1).
+- Primary insert path remains PostgreSQL `COPY` (binary import) for maximum throughput; on COPY failure the code falls back to transactional parameterized inserts.
+- `StorageServiceCollectionExtensions` now passes `IConfiguration` into the bulk storage implementation so performance settings are configurable via `appsettings.json` or environment variables.
+- Kestrel / gRPC: collector now explicitly configures HTTP/2 and increases max request size (50 MB default) to support large OTLP payloads.
+- OTLP timestamp conversion logic replaced with `DateTimeOffset.UnixEpoch.AddTicks(...)` for clarity and correctness.
+- Added logging for batch counts, retries, and fallback events.
+
+## Configuration keys (defaults)
+
+- `AppTrace:Performance:BatchSize` = 1000
+- `AppTrace:Performance:ConnectionPoolSize` = 4
+- `AppTrace:Performance:MaxRetries` = 3
+- `AppTrace:Performance:RetryBackoffSeconds` = 1
+
+Add these to `appsettings.json` or set as environment variables to tune performance.
+
+## Implementation notes
+
+- Bulk storage uses `BeginBinaryImportAsync` for COPY and splits incoming items into chunks before importing.
+- Each chunk is processed under a concurrency semaphore and wrapped in a Polly retry policy.
+- Fallback parameterized inserts are executed inside a DB transaction and will roll back on error to avoid partial writes.
+
+## Next recommended steps
+
+1. Expose ingestion metrics (processed batches, insert latency, failures) and add `/metrics` endpoint.
+2. Add a circuit breaker to the retry policy to avoid retry storms during persistent database outages.
+3. Implement dead-letter storage for permanently failed batches to enable manual replay.
+4. Add tests for chunking, retry behavior, and fallback path.
+
+
 ## 🧰 Tooling & Dependencies
 
 | Component        | Tool/Lib                                                                          |
