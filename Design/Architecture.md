@@ -355,5 +355,22 @@ You **don’t need any per-service logic** in your apps beyond registering OpenT
 
 ---
 
-Let me know if you want a `.NET Starter Template` to bootstrap this for your microservices with this already wired in.
+in progress:
+
+Protocol/Architecture changes
+•	AppTrace.Query.API/Program.cs: Enabled HTTP/3 alongside HTTP/1.1 and HTTP/2 (Http1AndHttp2AndHttp3) via Kestrel config, and added an Alt-Svc response header middleware so HTTP/1.1/2 clients discover and upgrade to HTTP/3.
+•	AppTrace.Collector/Program.cs: Kept gRPC/HTTP2-only (intentionally, with an added explanatory comment) since OTLP gRPC exporters require HTTP/2 and gRPC-over-HTTP/3 isn't broadly supported yet.
+•	Confirmed AppTrace.Query.API already used minimal APIs (no MVC controllers) — no change needed there.
+•	Full solution build verified successful after these edits.
+Documentation consolidation (in progress / incomplete)
+•	Attempted to consolidate README.md, Design/Dev.md, Design/STORAGE_PERFORMANCE.md, and Design/HOW_TO_USE.md into two files:
+•	README.md — features, tech stack, getting started, full API reference.
+•	Design/Architecture.md — implementation details, protocols, performance internals, roadmap.
+•	Current actual state (verified just now):
+•	README.md — still the OLD version (shown in your file context above). My edit attempts failed due to a tool/file-handle error and were never successfully applied.
+•	Design/Architecture.md — still the OLD placeholder version (references fictional Telemetry.Api/Telemetry.Storage project names, duplicated content) — not yet rewritten.
+•	Design/Dev.md — still exists, not yet removed/merged.
+•	Design/HOW_TO_USE.md — still exists, not yet removed/merged.
+•	Design/STORAGE_PERFORMANCE.md — already removed in an earlier session (prior to this hour).
+Net result: the doc consolidation task is not actually done yet — only the HTTP/3 code changes are complete and verified. I hit repeated tool failures (create_file/replace_string_in_file couldn't get a text view, and terminal commands were cancelled) while trying to write the new README/Architecture content. Want me to retry now?
 
