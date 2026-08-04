@@ -188,12 +188,78 @@ Add these to `appsettings.json` or set as environment variables to tune performa
 - Each chunk is processed under a concurrency semaphore and wrapped in a Polly retry policy.
 - Fallback parameterized inserts are executed inside a DB transaction and will roll back on error to avoid partial writes.
 
+## ✅ Gap Closure — Query API, Columnar Responses, Self-Observability Metrics
+
+The following previously-missing features (see checklist above) have been implemented:
+
+### 1. `AppTrace.Query.API` (was a template stub, now real)
+
+Minimal API endpoints backed directly by `AppTrace.Storage`:
+
+- `GET /api/logs?page=&pageSize=`
+- `GET /api/logs/search?term=&page=&pageSize=`
+- `GET /api/traces?page=&pageSize=`
+- `GET /api/traces/{traceId}`
+- `GET /api/metrics?page=&pageSize=`
+- `GET /api/metrics/{name}?page=&pageSize=`
+- `GET /api/export/{type}` (`logs`/`traces`/`metrics`) — CSV export reusing the same columnar data
+- `GET /metrics/query` — self-observability snapshot (see below)
+- `GET /health`
+
+Pagination is capped at `pageSize=100000` to allow fetching very large result sets in one page while still preventing unbounded queries.
+
+### 2. Columnar ("DataTable-like") response contract
+
+Instead of returning `[{...}, {...}]` (one JSON object per record, repeating property names), all list endpoints return a `TabularResult`:
+
+```json
+{
+  "columns": ["Id", "Timestamp", "Severity", "ServiceName", "TraceId", "SpanId", "Body", "Attributes"],
+  "rows": [
+    ["...", "2025-01-01T00:00:00Z", "Error", "MyService", "...", "...", "message text", "{}"]
+  ],
+  "totalCount": 128000,
+  "page": 1,
+  "pageSize": 1000
+}
+```
+
+This is defined in `AppTrace.Common/Models/TabularResult.cs` along with mapping extensions (`ToTabularResult(...)`) for `LogEntry`/`TraceEntry`/`MetricEntry` collections. Column order is fixed per entity type so clients can format cells by index without reflection — critical for cheaply rendering/paging through 100k+ records in the Blazor UI.
+
+### 3. Paged, counted storage queries
+
+`ILogStorage`/`ITraceStorage`/`IMetricStorage` gained `Get*PagedAsync(...)` methods returning `PagedResult<T>` (items + total count). PostgreSQL implementations use a `COUNT(*) OVER()` window function to get the total count in the same query instead of a second round-trip; in-memory implementations compute the count in-process for dev/test parity.
+
+### 4. Self-observability metrics
+
+`AppTrace.Storage.IngestionMetrics` is a lock-free (Interlocked-based) singleton tracking batches processed, items inserted, retry/fallback/failure counts, and p50/p95/p99 insert latency (rolling sample window). Exposed via:
+
+- `GET /metrics/ingestion` on `AppTrace.Collector`
+- `GET /metrics/query` on `AppTrace.Query.API`
+
+### 5. Blazor WASM viewer UI
+
+Added `Pages/Logs.razor`, `Pages/Traces.razor`, `Pages/Metrics.razor`, all built on a shared `Shared/TabularGrid.razor` component that binds directly to `TabularResult.Columns`/`Rows` using `<Virtualize>` (no per-record reflection, minimal render cost even at 100k rows). Each page supports search/filter, a page-size selector (100/1k/10k/100k), pagination, and a CSV export link.
+
+### 6. gRPC message size bug fix
+
+`AddGrpc()` now sets `MaxReceiveMessageSize` to 50 MB to match Kestrel's `MaxRequestBodySize`; previously large OTLP batches could be rejected with `RESOURCE_EXHAUSTED` despite the Kestrel limit being raised.
+
+## Still open (not yet implemented — tracked as fast-follows)
+
+1. Circuit breaker on the Polly retry policy (to avoid retry storms during sustained DB outages).
+2. Dead-letter storage for permanently failed batches (manual replay).
+3. `migrations.sql` / formal DB schema migration scripts (tables currently assumed pre-created).
+4. Optional auth (Azure AD or static token) — intentionally deferred to keep the "free for all" self-hosted story simple.
+5. Additional automated tests for chunking/retry/fallback paths and the new paged query/export endpoints.
+
 ## Next recommended steps
 
-1. Expose ingestion metrics (processed batches, insert latency, failures) and add `/metrics` endpoint.
+1. ~~Expose ingestion metrics (processed batches, insert latency, failures) and add `/metrics` endpoint.~~ ✅ Done — see Gap Closure #4.
 2. Add a circuit breaker to the retry policy to avoid retry storms during persistent database outages.
 3. Implement dead-letter storage for permanently failed batches to enable manual replay.
 4. Add tests for chunking, retry behavior, and fallback path.
+
 
 
 ## 🧰 Tooling & Dependencies

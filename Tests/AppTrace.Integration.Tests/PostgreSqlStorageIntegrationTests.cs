@@ -21,6 +21,7 @@ public class PostgreSqlStorageIntegrationTests : IAsyncLifetime
     private readonly IFixture _fixture;
     private readonly ILogger<PostgreSqlLogStorage> _mockLogger;
     private string _connectionString = string.Empty;
+    private NpgsqlDataSource _dataSource = null!;
 
     public PostgreSqlStorageIntegrationTests()
     {
@@ -40,13 +41,15 @@ public class PostgreSqlStorageIntegrationTests : IAsyncLifetime
     {
         await _postgreSqlContainer.StartAsync();
         _connectionString = _postgreSqlContainer.GetConnectionString();
-        
+        _dataSource = new NpgsqlDataSourceBuilder(_connectionString).Build();
+
         // Create the schema
         await CreateDatabaseSchema();
     }
 
     public async Task DisposeAsync()
     {
+        await _dataSource.DisposeAsync();
         await _postgreSqlContainer.DisposeAsync();
     }
 
@@ -54,7 +57,7 @@ public class PostgreSqlStorageIntegrationTests : IAsyncLifetime
     public async Task PostgreSqlLogStorage_IntegrationTest_ShouldWorkEndToEnd()
     {
         // Arrange
-        var storage = new PostgreSqlLogStorage(_connectionString, _mockLogger);
+        var storage = new PostgreSqlLogStorage(_dataSource, _mockLogger);
         var testLogs = _fixture.Build<LogEntry>()
             .With(x => x.Attributes, new Dictionary<string, object>
             {
@@ -83,7 +86,7 @@ public class PostgreSqlStorageIntegrationTests : IAsyncLifetime
     public async Task PostgreSqlLogStorage_SearchFunctionality_ShouldFilterCorrectly()
     {
         // Arrange
-        var storage = new PostgreSqlLogStorage(_connectionString, _mockLogger);
+        var storage = new PostgreSqlLogStorage(_dataSource, _mockLogger);
         var searchTerm = "CRITICAL_ERROR_12345";
         
         var matchingLogs = _fixture.Build<LogEntry>()
@@ -111,7 +114,7 @@ public class PostgreSqlStorageIntegrationTests : IAsyncLifetime
     public async Task PostgreSqlLogStorage_ConcurrentWrites_ShouldHandleCorrectly()
     {
         // Arrange
-        var storage = new PostgreSqlLogStorage(_connectionString, _mockLogger);
+        var storage = new PostgreSqlLogStorage(_dataSource, _mockLogger);
         var tasks = new List<Task>();
         const int batchCount = 5;
         const int logsPerBatch = 20;

@@ -42,6 +42,28 @@ TelemetryTool.sln
 
 ---
 
+## ✅ Implemented Query API Contract (AppTrace.Query.API)
+
+`AppTrace.Query.API` exposes real endpoints (no longer a template stub):
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /api/logs?page=&pageSize=` | Paged log list |
+| `GET /api/logs/search?term=&page=&pageSize=` | Full-text search over log body/attributes |
+| `GET /api/traces?page=&pageSize=` | Paged trace span list |
+| `GET /api/traces/{traceId}` | All spans for a given trace ID |
+| `GET /api/metrics?page=&pageSize=` | Paged metric list |
+| `GET /api/metrics/{name}?page=&pageSize=` | Metrics filtered by name |
+| `GET /api/export/{type}` | CSV export (`type` = `logs`/`traces`/`metrics`) |
+| `GET /metrics/query` | Self-observability snapshot (see `IngestionMetrics`) |
+| `GET /health` | Health check |
+
+All list endpoints return a **columnar `TabularResult`** (`{ columns, rows, totalCount, page, pageSize }`) instead of one JSON object per record — this avoids repeating property names across potentially 100k+ rows and lets the Blazor UI bind directly to a grid (`Shared/TabularGrid.razor` using `<Virtualize>`) without per-record reflection. See `AppTrace.Common/Models/TabularResult.cs`.
+
+`pageSize` is capped at 100,000 to support very large single-page fetches while still preventing unbounded queries.
+
+---
+
 ## 📦 gRPC Services to Define (OTLP-Compatible)
 
 Define gRPC services that map to:
@@ -53,6 +75,7 @@ Define gRPC services that map to:
 This means:
 
 * Accept OTLP proto (or your simplified version)
+
 * Transform incoming data and write to PostgreSQL via `Telemetry.Storage`
 
 ---

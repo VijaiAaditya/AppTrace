@@ -11,12 +11,12 @@ namespace AppTrace.Storage;
 /// </summary>
 public class PostgreSqlLogStorage : ILogStorage
 {
-    private readonly string _connectionString;
+    private readonly NpgsqlDataSource _dataSource;
     private readonly ILogger<PostgreSqlLogStorage> _logger;
 
-    public PostgreSqlLogStorage(string connectionString, ILogger<PostgreSqlLogStorage> logger)
+    public PostgreSqlLogStorage(NpgsqlDataSource dataSource, ILogger<PostgreSqlLogStorage> logger)
     {
-        _connectionString = connectionString;
+        _dataSource = dataSource;
         _logger = logger;
     }
 
@@ -30,8 +30,7 @@ public class PostgreSqlLogStorage : ILogStorage
 
         try
         {
-            using var connection = new NpgsqlConnection(_connectionString);
-            await connection.OpenAsync();
+            using var connection = await _dataSource.OpenConnectionAsync();
 
             var parameters = logs.Select(log => new
             {
@@ -63,8 +62,7 @@ public class PostgreSqlLogStorage : ILogStorage
             ORDER BY timestamp DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { Limit = limit, Offset = offset });
         
@@ -89,8 +87,7 @@ public class PostgreSqlLogStorage : ILogStorage
             ORDER BY timestamp DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var searchPattern = $"%{searchTerm}%";
         var results = await connection.QueryAsync<dynamic>(sql, new { SearchTerm = searchPattern, Limit = limit, Offset = offset });
@@ -106,16 +103,74 @@ public class PostgreSqlLogStorage : ILogStorage
             Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
         });
     }
+
+    public async Task<PagedResult<LogEntry>> GetLogsPagedAsync(int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, timestamp, trace_id as TraceId, span_id as SpanId, severity, body, attributes, service_name,
+                   COUNT(*) OVER() AS total_count
+            FROM logs
+            ORDER BY timestamp DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var results = (await connection.QueryAsync<dynamic>(sql, new { Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new LogEntry
+        {
+            Id = row.id,
+            Timestamp = row.timestamp,
+            TraceId = row.traceid ?? string.Empty,
+            SpanId = row.spanid ?? string.Empty,
+            Severity = row.severity ?? string.Empty,
+            Body = row.body ?? string.Empty,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<LogEntry>(items, totalCount);
+    }
+
+    public async Task<PagedResult<LogEntry>> SearchLogsPagedAsync(string searchTerm, int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, timestamp, trace_id as TraceId, span_id as SpanId, severity, body, attributes, service_name,
+                   COUNT(*) OVER() AS total_count
+            FROM logs
+            WHERE body ILIKE @SearchTerm OR attributes::text ILIKE @SearchTerm
+            ORDER BY timestamp DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var searchPattern = $"%{searchTerm}%";
+        var results = (await connection.QueryAsync<dynamic>(sql, new { SearchTerm = searchPattern, Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new LogEntry
+        {
+            Id = row.id,
+            Timestamp = row.timestamp,
+            TraceId = row.traceid ?? string.Empty,
+            SpanId = row.spanid ?? string.Empty,
+            Severity = row.severity ?? string.Empty,
+            Body = row.body ?? string.Empty,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<LogEntry>(items, totalCount);
+    }
 }
 
 public class PostgreSqlTraceStorage : ITraceStorage
 {
-    private readonly string _connectionString;
+    private readonly NpgsqlDataSource _dataSource;
     private readonly ILogger<PostgreSqlTraceStorage> _logger;
 
-    public PostgreSqlTraceStorage(string connectionString, ILogger<PostgreSqlTraceStorage> logger)
+    public PostgreSqlTraceStorage(NpgsqlDataSource dataSource, ILogger<PostgreSqlTraceStorage> logger)
     {
-        _connectionString = connectionString;
+        _dataSource = dataSource;
         _logger = logger;
     }
 
@@ -129,8 +184,7 @@ public class PostgreSqlTraceStorage : ITraceStorage
 
         try
         {
-            using var connection = new NpgsqlConnection(_connectionString);
-            await connection.OpenAsync();
+            using var connection = await _dataSource.OpenConnectionAsync();
 
             var parameters = traces.Select(trace => new
             {
@@ -166,8 +220,7 @@ public class PostgreSqlTraceStorage : ITraceStorage
             ORDER BY start_time DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { Limit = limit, Offset = offset });
         
@@ -194,8 +247,7 @@ public class PostgreSqlTraceStorage : ITraceStorage
             WHERE trace_id = @TraceId
             ORDER BY start_time ASC";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { TraceId = traceId });
         
@@ -212,16 +264,47 @@ public class PostgreSqlTraceStorage : ITraceStorage
             Status = row.status ?? string.Empty
         });
     }
+
+    public async Task<PagedResult<TraceEntry>> GetTracesPagedAsync(int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, trace_id as TraceId, span_id as SpanId, parent_span_id as ParentSpanId,
+                   name, start_time as StartTime, end_time as EndTime, attributes, status,
+                   COUNT(*) OVER() AS total_count
+            FROM traces
+            ORDER BY start_time DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var results = (await connection.QueryAsync<dynamic>(sql, new { Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new TraceEntry
+        {
+            Id = row.id,
+            TraceId = row.traceid ?? string.Empty,
+            SpanId = row.spanid ?? string.Empty,
+            ParentSpanId = row.parentspanid ?? string.Empty,
+            Name = row.name ?? string.Empty,
+            StartTime = row.starttime,
+            EndTime = row.endtime,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}"),
+            Status = row.status ?? string.Empty
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<TraceEntry>(items, totalCount);
+    }
 }
 
 public class PostgreSqlMetricStorage : IMetricStorage
 {
-    private readonly string _connectionString;
+    private readonly NpgsqlDataSource _dataSource;
     private readonly ILogger<PostgreSqlMetricStorage> _logger;
 
-    public PostgreSqlMetricStorage(string connectionString, ILogger<PostgreSqlMetricStorage> logger)
+    public PostgreSqlMetricStorage(NpgsqlDataSource dataSource, ILogger<PostgreSqlMetricStorage> logger)
     {
-        _connectionString = connectionString;
+        _dataSource = dataSource;
         _logger = logger;
     }
 
@@ -235,8 +318,7 @@ public class PostgreSqlMetricStorage : IMetricStorage
 
         try
         {
-            using var connection = new NpgsqlConnection(_connectionString);
-            await connection.OpenAsync();
+            using var connection = await _dataSource.OpenConnectionAsync();
 
             var parameters = metrics.Select(metric => new
             {
@@ -266,8 +348,7 @@ public class PostgreSqlMetricStorage : IMetricStorage
             ORDER BY timestamp DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { Limit = limit, Offset = offset });
         
@@ -290,12 +371,11 @@ public class PostgreSqlMetricStorage : IMetricStorage
             ORDER BY timestamp DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var searchPattern = $"%{metricName}%";
         var results = await connection.QueryAsync<dynamic>(sql, new { MetricName = searchPattern, Limit = limit, Offset = offset });
-        
+
         return results.Select(row => new MetricEntry
         {
             Id = row.id,
@@ -304,5 +384,59 @@ public class PostgreSqlMetricStorage : IMetricStorage
             Value = row.value,
             Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
         });
+    }
+
+    public async Task<PagedResult<MetricEntry>> GetMetricsPagedAsync(int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, name, timestamp, value, attributes,
+                   COUNT(*) OVER() AS total_count
+            FROM metrics
+            ORDER BY timestamp DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var results = (await connection.QueryAsync<dynamic>(sql, new { Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new MetricEntry
+        {
+            Id = row.id,
+            Name = row.name ?? string.Empty,
+            Timestamp = row.timestamp,
+            Value = row.value,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<MetricEntry>(items, totalCount);
+    }
+
+    public async Task<PagedResult<MetricEntry>> GetMetricsByNamePagedAsync(string metricName, int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, name, timestamp, value, attributes,
+                   COUNT(*) OVER() AS total_count
+            FROM metrics
+            WHERE name ILIKE @MetricName
+            ORDER BY timestamp DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var searchPattern = $"%{metricName}%";
+        var results = (await connection.QueryAsync<dynamic>(sql, new { MetricName = searchPattern, Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new MetricEntry
+        {
+            Id = row.id,
+            Name = row.name ?? string.Empty,
+            Timestamp = row.timestamp,
+            Value = row.value,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<MetricEntry>(items, totalCount);
     }
 }

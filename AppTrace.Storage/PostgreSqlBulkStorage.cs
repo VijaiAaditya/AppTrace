@@ -1,11 +1,12 @@
 using AppTrace.Common.Models;
 using Dapper;
 using Npgsql;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Data;
 using Microsoft.Extensions.Logging;
 using NpgsqlTypes;
-using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using Polly;
 using Polly.Retry;
 
@@ -15,36 +16,46 @@ namespace AppTrace.Storage;
 /// High-performance PostgreSQL storage using PostgreSQL COPY for ultra-fast bulk insertions
 /// Adds batching, concurrency limiting and retry policies for production readiness
 /// </summary>
-public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
+public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage, IDisposable
 {
-    private readonly string _connectionString;
+    private readonly NpgsqlDataSource _dataSource;
     private readonly ILogger<PostgreSqlBulkStorage> _logger;
+    private readonly IngestionMetrics _metrics;
     private readonly int _batchSize;
-    private readonly int _maxConcurrency;
     private readonly int _maxRetries;
     private readonly TimeSpan _retryBackoffBase;
     private readonly SemaphoreSlim _concurrencySemaphore;
     private readonly AsyncRetryPolicy _retryPolicy;
+    private bool _disposed;
 
-    public PostgreSqlBulkStorage(string connectionString, ILogger<PostgreSqlBulkStorage> logger, IConfiguration configuration)
+    public PostgreSqlBulkStorage(NpgsqlDataSource dataSource, ILogger<PostgreSqlBulkStorage> logger, IOptions<StoragePerformanceOptions> options, IngestionMetrics metrics)
     {
-        _connectionString = connectionString;
+        _dataSource = dataSource;
         _logger = logger;
+        _metrics = metrics;
 
-        // Configuration with sensible defaults
-        _batchSize = int.TryParse(configuration["AppTrace:Performance:BatchSize"], out var bs) ? bs : 1000;
-        _maxConcurrency = int.TryParse(configuration["AppTrace:Performance:ConnectionPoolSize"], out var mc) ? mc : 4;
-        _maxRetries = int.TryParse(configuration["AppTrace:Performance:MaxRetries"], out var mr) ? mr : 3;
-        _retryBackoffBase = TimeSpan.FromSeconds(double.TryParse(configuration["AppTrace:Performance:RetryBackoffSeconds"], out var rb) ? rb : 1);
+        var performance = options.Value;
+        _batchSize = performance.BatchSize;
+        _maxRetries = performance.MaxRetries;
+        _retryBackoffBase = TimeSpan.FromSeconds(performance.RetryBackoffSeconds);
 
-        _concurrencySemaphore = new SemaphoreSlim(_maxConcurrency);
+        _concurrencySemaphore = new SemaphoreSlim(performance.ConnectionPoolSize);
 
         _retryPolicy = Policy
             .Handle<Exception>()
             .WaitAndRetryAsync(_maxRetries, attempt => TimeSpan.FromMilliseconds(_retryBackoffBase.TotalMilliseconds * Math.Pow(2, attempt - 1)), onRetry: (ex, ts, attempt, ctx) =>
             {
+                _metrics.RecordRetry();
                 _logger.LogWarning(ex, "Retry {Attempt} after {Delay}ms due to error", attempt, ts.TotalMilliseconds);
             });
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _concurrencySemaphore.Dispose();
+        _disposed = true;
+        GC.SuppressFinalize(this);
     }
 
     // Helper to chunk enumerable
@@ -78,10 +89,10 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
     private async Task InsertLogBatchAsync(List<LogEntry> logs)
     {
         await _concurrencySemaphore.WaitAsync();
+        var stopwatch = Stopwatch.StartNew();
         try
         {
-            using var connection = new NpgsqlConnection(_connectionString);
-            await connection.OpenAsync();
+            using var connection = await _dataSource.OpenConnectionAsync();
 
             try
             {
@@ -103,12 +114,19 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
 
                 await writer.CompleteAsync();
                 _logger.LogDebug("Bulk inserted {Count} log entries using COPY", logs.Count);
+                _metrics.RecordBatch(logs.Count, stopwatch.Elapsed);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed COPY for {Count} log entries, falling back", logs.Count);
+                _metrics.RecordFallback();
                 await FallbackInsertLogsAsync(logs);
             }
+        }
+        catch (Exception)
+        {
+            _metrics.RecordFailure();
+            throw;
         }
         finally
         {
@@ -122,8 +140,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             INSERT INTO logs (id, timestamp, trace_id, span_id, severity, body, attributes, service_name)
             VALUES (@Id, @Timestamp, @TraceId, @SpanId, @Severity, @Body, @Attributes::jsonb, @ServiceName)";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         using var tx = await connection.BeginTransactionAsync();
         try
@@ -160,8 +177,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             ORDER BY timestamp DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { Limit = limit, Offset = offset });
 
@@ -186,8 +202,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             ORDER BY timestamp DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var searchPattern = $"%{searchTerm}%";
         var results = await connection.QueryAsync<dynamic>(sql, new { SearchTerm = searchPattern, Limit = limit, Offset = offset });
@@ -202,6 +217,64 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             Body = row.body ?? string.Empty,
             Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
         });
+    }
+
+    public async Task<PagedResult<LogEntry>> GetLogsPagedAsync(int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, timestamp, trace_id as TraceId, span_id as SpanId, severity, body, attributes,
+                   COUNT(*) OVER() AS total_count
+            FROM logs
+            ORDER BY timestamp DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var results = (await connection.QueryAsync<dynamic>(sql, new { Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new LogEntry
+        {
+            Id = row.id,
+            Timestamp = row.timestamp,
+            TraceId = row.traceid ?? string.Empty,
+            SpanId = row.spanid ?? string.Empty,
+            Severity = row.severity ?? string.Empty,
+            Body = row.body ?? string.Empty,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<LogEntry>(items, totalCount);
+    }
+
+    public async Task<PagedResult<LogEntry>> SearchLogsPagedAsync(string searchTerm, int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, timestamp, trace_id as TraceId, span_id as SpanId, severity, body, attributes,
+                   COUNT(*) OVER() AS total_count
+            FROM logs
+            WHERE body ILIKE @SearchTerm OR attributes::text ILIKE @SearchTerm
+            ORDER BY timestamp DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var searchPattern = $"%{searchTerm}%";
+        var results = (await connection.QueryAsync<dynamic>(sql, new { SearchTerm = searchPattern, Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new LogEntry
+        {
+            Id = row.id,
+            Timestamp = row.timestamp,
+            TraceId = row.traceid ?? string.Empty,
+            SpanId = row.spanid ?? string.Empty,
+            Severity = row.severity ?? string.Empty,
+            Body = row.body ?? string.Empty,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<LogEntry>(items, totalCount);
     }
 
     // ============ TRACE STORAGE ============
@@ -221,8 +294,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
         await _concurrencySemaphore.WaitAsync();
         try
         {
-            using var connection = new NpgsqlConnection(_connectionString);
-            await connection.OpenAsync();
+            using var connection = await _dataSource.OpenConnectionAsync();
 
             try
             {
@@ -265,8 +337,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             INSERT INTO traces (id, trace_id, span_id, parent_span_id, name, start_time, end_time, attributes, status, service_name)
             VALUES (@Id, @TraceId, @SpanId, @ParentSpanId, @Name, @StartTime, @EndTime, @Attributes::jsonb, @Status, @ServiceName)";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         using var tx = await connection.BeginTransactionAsync();
         try
@@ -305,8 +376,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             ORDER BY start_time DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { Limit = limit, Offset = offset });
 
@@ -333,8 +403,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             WHERE trace_id = @TraceId
             ORDER BY start_time ASC";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { TraceId = traceId });
 
@@ -350,6 +419,37 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}"),
             Status = row.status ?? string.Empty
         });
+    }
+
+    public async Task<PagedResult<TraceEntry>> GetTracesPagedAsync(int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, trace_id as TraceId, span_id as SpanId, parent_span_id as ParentSpanId,
+                   name, start_time as StartTime, end_time as EndTime, attributes, status,
+                   COUNT(*) OVER() AS total_count
+            FROM traces
+            ORDER BY start_time DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var results = (await connection.QueryAsync<dynamic>(sql, new { Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new TraceEntry
+        {
+            Id = row.id,
+            TraceId = row.traceid ?? string.Empty,
+            SpanId = row.spanid ?? string.Empty,
+            ParentSpanId = row.parentspanid ?? string.Empty,
+            Name = row.name ?? string.Empty,
+            StartTime = row.starttime,
+            EndTime = row.endtime,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}"),
+            Status = row.status ?? string.Empty
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<TraceEntry>(items, totalCount);
     }
 
     // ============ METRIC STORAGE ============
@@ -369,8 +469,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
         await _concurrencySemaphore.WaitAsync();
         try
         {
-            using var connection = new NpgsqlConnection(_connectionString);
-            await connection.OpenAsync();
+            using var connection = await _dataSource.OpenConnectionAsync();
 
             try
             {
@@ -409,8 +508,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             INSERT INTO metrics (id, name, timestamp, value, attributes, service_name)
             VALUES (@Id, @Name, @Timestamp, @Value, @Attributes::jsonb, @ServiceName)";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         using var tx = await connection.BeginTransactionAsync();
         try
@@ -444,8 +542,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             ORDER BY timestamp DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var results = await connection.QueryAsync<dynamic>(sql, new { Limit = limit, Offset = offset });
 
@@ -468,8 +565,7 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             ORDER BY timestamp DESC 
             LIMIT @Limit OFFSET @Offset";
 
-        using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync();
+        using var connection = await _dataSource.OpenConnectionAsync();
 
         var searchPattern = $"%{metricName}%";
         var results = await connection.QueryAsync<dynamic>(sql, new { MetricName = searchPattern, Limit = limit, Offset = offset });
@@ -482,5 +578,59 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage
             Value = row.value,
             Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
         });
+    }
+
+    public async Task<PagedResult<MetricEntry>> GetMetricsPagedAsync(int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, name, timestamp, value, attributes,
+                   COUNT(*) OVER() AS total_count
+            FROM metrics
+            ORDER BY timestamp DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var results = (await connection.QueryAsync<dynamic>(sql, new { Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new MetricEntry
+        {
+            Id = row.id,
+            Name = row.name ?? string.Empty,
+            Timestamp = row.timestamp,
+            Value = row.value,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<MetricEntry>(items, totalCount);
+    }
+
+    public async Task<PagedResult<MetricEntry>> GetMetricsByNamePagedAsync(string metricName, int page = 1, int pageSize = 100)
+    {
+        const string sql = @"
+            SELECT id, name, timestamp, value, attributes,
+                   COUNT(*) OVER() AS total_count
+            FROM metrics
+            WHERE name ILIKE @MetricName
+            ORDER BY timestamp DESC
+            LIMIT @Limit OFFSET @Offset";
+
+        using var connection = await _dataSource.OpenConnectionAsync();
+
+        var searchPattern = $"%{metricName}%";
+        var results = (await connection.QueryAsync<dynamic>(sql, new { MetricName = searchPattern, Limit = pageSize, Offset = (page - 1) * pageSize })).ToList();
+
+        var items = results.Select(row => new MetricEntry
+        {
+            Id = row.id,
+            Name = row.name ?? string.Empty,
+            Timestamp = row.timestamp,
+            Value = row.value,
+            Attributes = JsonSerializer.Deserialize<Dictionary<string, object>>(row.attributes?.ToString() ?? "{}")
+        }).ToList();
+
+        long totalCount = results.Count > 0 ? (long)results[0].total_count : 0;
+        return new PagedResult<MetricEntry>(items, totalCount);
     }
 }

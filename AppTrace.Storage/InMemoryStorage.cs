@@ -43,6 +43,29 @@ public class InMemoryLogStorage : ILogStorage
                 .AsEnumerable());
         }
     }
+
+    public Task<PagedResult<LogEntry>> GetLogsPagedAsync(int page = 1, int pageSize = 100)
+    {
+        lock (_lock)
+        {
+            var ordered = _logs.OrderByDescending(l => l.Timestamp).ToList();
+            var items = ordered.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            return Task.FromResult(new PagedResult<LogEntry>(items, ordered.Count));
+        }
+    }
+
+    public Task<PagedResult<LogEntry>> SearchLogsPagedAsync(string searchTerm, int page = 1, int pageSize = 100)
+    {
+        lock (_lock)
+        {
+            var filtered = _logs
+                .Where(l => l.Body.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(l => l.Timestamp)
+                .ToList();
+            var items = filtered.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            return Task.FromResult(new PagedResult<LogEntry>(items, filtered.Count));
+        }
+    }
 }
 
 public class InMemoryTraceStorage : ITraceStorage
@@ -79,6 +102,16 @@ public class InMemoryTraceStorage : ITraceStorage
                 .Where(t => t.TraceId == traceId)
                 .OrderBy(t => t.StartTime)
                 .AsEnumerable());
+        }
+    }
+
+    public Task<PagedResult<TraceEntry>> GetTracesPagedAsync(int page = 1, int pageSize = 100)
+    {
+        lock (_lock)
+        {
+            var ordered = _traces.OrderByDescending(t => t.StartTime).ToList();
+            var items = ordered.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            return Task.FromResult(new PagedResult<TraceEntry>(items, ordered.Count));
         }
     }
 }
@@ -119,6 +152,29 @@ public class InMemoryMetricStorage : IMetricStorage
                 .Skip(offset)
                 .Take(limit)
                 .AsEnumerable());
+        }
+    }
+
+    public Task<PagedResult<MetricEntry>> GetMetricsPagedAsync(int page = 1, int pageSize = 100)
+    {
+        lock (_lock)
+        {
+            var ordered = _metrics.OrderByDescending(m => m.Timestamp).ToList();
+            var items = ordered.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            return Task.FromResult(new PagedResult<MetricEntry>(items, ordered.Count));
+        }
+    }
+
+    public Task<PagedResult<MetricEntry>> GetMetricsByNamePagedAsync(string metricName, int page = 1, int pageSize = 100)
+    {
+        lock (_lock)
+        {
+            var filtered = _metrics
+                .Where(m => m.Name.Contains(metricName, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(m => m.Timestamp)
+                .ToList();
+            var items = filtered.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            return Task.FromResult(new PagedResult<MetricEntry>(items, filtered.Count));
         }
     }
 }
