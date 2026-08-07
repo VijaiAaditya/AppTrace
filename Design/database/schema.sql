@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS traces (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Natural-key uniqueness for idempotent bulk inserts (ON CONFLICT DO NOTHING)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_traces_trace_span_id ON traces(trace_id, span_id);
+
 -- Indexes for traces table
 CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON traces(trace_id);
 CREATE INDEX IF NOT EXISTS idx_traces_span_id ON traces(span_id);

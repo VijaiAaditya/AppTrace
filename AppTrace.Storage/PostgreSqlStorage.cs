@@ -180,7 +180,8 @@ public class PostgreSqlTraceStorage : ITraceStorage
 
         const string sql = @"
             INSERT INTO traces (id, trace_id, span_id, parent_span_id, name, start_time, end_time, attributes, status, service_name, duration_ms)
-            VALUES (@Id, @TraceId, @SpanId, @ParentSpanId, @Name, @StartTime, @EndTime, @Attributes::jsonb, @Status, @ServiceName, @DurationMs)";
+            VALUES (@Id, @TraceId, @SpanId, @ParentSpanId, @Name, @StartTime, @EndTime, @Attributes::jsonb, @Status, @ServiceName, @DurationMs)
+            ON CONFLICT (trace_id, span_id) DO NOTHING";
 
         try
         {

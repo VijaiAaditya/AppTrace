@@ -289,59 +289,22 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage,
         await Task.WhenAll(tasks);
     }
 
+    // Traces use a plain parameterized INSERT with ON CONFLICT DO NOTHING (Dapper),
+    // instead of COPY + staging table. Trace volume is comparatively low (1 row per span)
+    // and span_id/trace_id form a meaningful natural key, so the simpler statement-based
+    // path is preferred over the added staging-table complexity used for logs/metrics.
     private async Task InsertTraceBatchAsync(List<TraceEntry> traces)
     {
         await _concurrencySemaphore.WaitAsync();
         try
         {
+            const string sql = @"
+                INSERT INTO traces (id, trace_id, span_id, parent_span_id, name, start_time, end_time, attributes, status, service_name)
+                VALUES (@Id, @TraceId, @SpanId, @ParentSpanId, @Name, @StartTime, @EndTime, @Attributes::jsonb, @Status, @ServiceName)
+                ON CONFLICT (trace_id, span_id) DO NOTHING";
+
             using var connection = await _dataSource.OpenConnectionAsync();
 
-            try
-            {
-                using var writer = await connection.BeginBinaryImportAsync(
-                    "COPY traces (id, trace_id, span_id, parent_span_id, name, start_time, end_time, attributes, status, service_name) FROM STDIN (FORMAT BINARY)");
-
-                foreach (var trace in traces)
-                {
-                    await writer.StartRowAsync();
-                    await writer.WriteAsync(trace.Id, NpgsqlDbType.Uuid);
-                    await writer.WriteAsync(trace.TraceId ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                    await writer.WriteAsync(trace.SpanId ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                    await writer.WriteAsync(trace.ParentSpanId ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                    await writer.WriteAsync(trace.Name ?? (object)DBNull.Value, NpgsqlDbType.Text);
-                    await writer.WriteAsync(trace.StartTime, NpgsqlDbType.TimestampTz);
-                    await writer.WriteAsync(trace.EndTime, NpgsqlDbType.TimestampTz);
-                    await writer.WriteAsync(JsonSerializer.Serialize(trace.Attributes ?? new Dictionary<string, object>()), NpgsqlDbType.Jsonb);
-                    await writer.WriteAsync(trace.Status ?? "OK", NpgsqlDbType.Text);
-                    await writer.WriteAsync(trace.Attributes?.GetValueOrDefault("service.name")?.ToString() ?? "unknown", NpgsqlDbType.Text);
-                }
-
-                await writer.CompleteAsync();
-                _logger.LogDebug("Bulk inserted {Count} trace entries using COPY", traces.Count);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed COPY for {Count} trace entries, falling back", traces.Count);
-                await FallbackInsertTracesAsync(traces);
-            }
-        }
-        finally
-        {
-            _concurrencySemaphore.Release();
-        }
-    }
-
-    private async Task FallbackInsertTracesAsync(IEnumerable<TraceEntry> traces)
-    {
-        const string sql = @"
-            INSERT INTO traces (id, trace_id, span_id, parent_span_id, name, start_time, end_time, attributes, status, service_name)
-            VALUES (@Id, @TraceId, @SpanId, @ParentSpanId, @Name, @StartTime, @EndTime, @Attributes::jsonb, @Status, @ServiceName)";
-
-        using var connection = await _dataSource.OpenConnectionAsync();
-
-        using var tx = await connection.BeginTransactionAsync();
-        try
-        {
             var parameters = traces.Select(trace => new
             {
                 Id = trace.Id,
@@ -357,13 +320,11 @@ public class PostgreSqlBulkStorage : ILogStorage, ITraceStorage, IMetricStorage,
             });
 
             await connection.ExecuteAsync(sql, parameters);
-            await tx.CommitAsync();
+            _logger.LogDebug("Inserted {Count} trace entries (ON CONFLICT DO NOTHING)", traces.Count);
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogError(ex, "Fallback insert failed for {Count} trace entries", traces.Count());
-            await tx.RollbackAsync();
-            throw;
+            _concurrencySemaphore.Release();
         }
     }
 
